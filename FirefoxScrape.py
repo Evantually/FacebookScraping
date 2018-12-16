@@ -26,7 +26,7 @@ def fbLogin(driver):
     passField = driver.find_element_by_id('pass')
     passField.send_keys(GEN_PASS)
     passField.send_keys(Keys.RETURN)
-    
+
 def retrievePosts():
     results = browser.find_elements_by_xpath('//div[@role="article"]')
     for res in results:
@@ -36,7 +36,7 @@ def retrievePosts():
         except:
             continue
     return articleLinks
-    
+
 def commentScrape():
     browser.get(link)
     WebDriverWait(browser, delay).until(EC.presence_of_element_located((By.ID, "m_story_permalink_view")))
@@ -51,7 +51,7 @@ def commentScrape():
             commentsFields()
         except:
             pass
-        
+
 def commentsFields():
     container = browser.find_element_by_id('m_story_permalink_view')
     comments = container.find_elements_by_xpath('./div[2]/div/div[5]/div')
@@ -108,12 +108,12 @@ def commentsFields():
                                                    {'$set': commentsStorage[commentID]})
         except StaleElementReferenceException:
             continue
-        
-def gatherReactions(reactionsLink):
+
+def gatherReactions(reactionsLink, replyID=''):
     reactionsList = []
-    browser2.get(reactionsLink)
-    WebDriverWait(browser2, delay).until(EC.presence_of_element_located((By.CLASS_NAME, "z")))
-    reactionCounts = browser2.find_element_by_class_name('z').find_elements_by_tag_name('a')
+    browser3.get(reactionsLink)
+    WebDriverWait(browser3, delay).until(EC.presence_of_element_located((By.CLASS_NAME, "z")))
+    reactionCounts = browser3.find_element_by_class_name('z').find_elements_by_tag_name('a')
     for reaction in reactionCounts:
         reactionLink = reaction.get_attribute('href')
         if 'reaction_type' in reactionLink:
@@ -121,7 +121,29 @@ def gatherReactions(reactionsLink):
             reactType = reactionsDict[val]
             count = reactionLink.split('total_count=')[1].split('&')[0]
             reactionsList.append((reactType, count))
+    gatherReactionAuthors(browser3, replyID)
     return reactionsList
+
+# I need to figure out a unique identifier for each reaction so that it can be inserted into the reactions collection.
+# I think the best way to do this would probably be create a string from the author profile, commentID, and replyID
+# to use as the key, and then have the reaction type as the value. We don't need the name for this because we can put their
+# name in the Profiles collection.
+def gatherReactionAuthors(browser3, replyID):
+    reacts = browser3.find_element_by_class_name('be').find_elements_by_tag_name("tr")
+    for react in reacts:
+        reactImages = react.find_elements_by_tag_name('img')
+        for reactImage in reactImages:
+            reactImg = reactImage.get_attribute('alt')
+            if reactImg in reactionsDict:
+                reactResponse = reactionsDict[reactImg]
+        reactAuthorProfile = react.find_element_by_xpath('./td[3]/div/h3[1]/a').get_attribute('href')
+        reactionsStorage[reactAuthorProfile][commentID][replyID]["react"] = reactResponse
+        search = reactionsCollection.find({"author":reactionsStorage[reactAuthorProfile]['replyID']})
+        if len([r for r in search]) == 0:
+            reactionsCollection.insert_one(reactionsStorage[reactAuthorProfile])
+        else:
+            repliesCollection.update_one({"replyID":repliesStorage[replyID]['replyID']},
+                                                   {'$set': repliesStorage[replyID]})
 
 def gatherReplies(repliesLink, commentID):
     browser2.get(repliesLink)
@@ -142,6 +164,10 @@ def repliesFields(commentID):
     responses = browser2.find_element_by_xpath(f'//div[@id = {commentID}]/following-sibling::div').find_elements_by_xpath('./div')
     for response in responses:
         replyID = response.get_attribute('id')
+        if replyID == f"comment_replies_more_2:{postID}_{commentID}":
+            response.find_element_by_xpath('./a').click()
+            time.sleep(1)
+            repliesFields(commentID)
         if replyID != f"comment_replies_more_1:{postID}_{commentID}":
             replyText = response.find_element_by_xpath('./div/div[1]').text
             replyAuthorElem = response.find_element_by_tag_name('h3').find_element_by_tag_name('a')
@@ -150,7 +176,7 @@ def repliesFields(commentID):
             reactionsLinkElem = response.find_element_by_id(f'like_{postID}_{replyID}').find_element_by_xpath('./span/a[1]')
             if 'Like' not in reactionsLinkElem.text:
                 replyReactionsLink = reactionsLinkElem.get_attribute('href')
-                replyReactions = gatherReactions(replyReactionsLink)
+                replyReactions = gatherReactions(replyReactionsLink, replyID)
             else:
                 replyReactions = []
             repliesStorage[replyID] = {
@@ -176,14 +202,16 @@ def pullFromMongo(coll):
         dictVar[r['commentID']] = r
     return dictVar
 
+
 startTime = datetime.now()
 conn = 'mongodb://localhost:27017'
 client = pymongo.MongoClient(conn)
 db = client.dt_posts
 commentsCollection = db.comments
 repliesCollection = db.replies
+reactionsCollection = db.reactions
 
-commentsStorage, repliesStorage = pullFromMongo(commentsCollection), pullFromMongo(repliesCollection)            
+commentsStorage, repliesStorage, reactionsStorage = pullFromMongo(commentsCollection), pullFromMongo(repliesCollection), pullFromMongo(reactionsCollection)
 delay = 10
 articleLinks, articles = [], []
 reactionsDict = {
@@ -193,23 +221,31 @@ reactionsDict = {
         "3": "wow",
         "4": "haha",
         "7": "sad",
-        "8": "angry"
+        "8": "angry",
+        "Like": "like",
+        "Love": "love",
+        "Haha": "haha",
+        "Angry": "angry",
+        "Wow": "wow",
+        "Sad": "sad"
         }
 
 browser = initialize()
 browser2 = initialize()
+browser3 = initialize()
 fbLogin(browser)
 fbLogin(browser2)
+fbLogin(browser3)
+
 browser.get('https://mobile.facebook.com/pg/DonaldTrump/posts/')
 WebDriverWait(browser, delay).until(EC.presence_of_element_located((By.ID, "structured_composer_async_container")))
 for i in range(5):
     articles.extend(retrievePosts())
     browser.find_element_by_id('structured_composer_async_container').find_element_by_xpath('./div[2]/a').click()
     time.sleep(2)
-print(f"Number of articles: {len(articleLinks)}")
+
 for link in articleLinks:
     postID = link.split('story_fbid=')[1].split('&')[0]
     commentScrape()
-
 print(f"Run completed at {datetime.now()}")
 print(f"Elapsed time: {datetime.now() - startTime}")
