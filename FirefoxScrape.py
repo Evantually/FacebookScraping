@@ -108,6 +108,7 @@ def commentsFields():
                                                    {'$set': commentsStorage[commentID]})
         except StaleElementReferenceException:
             continue
+        
 def gatherReactions(reactionsLink):
     reactionsList = []
     browser2.get(reactionsLink)
