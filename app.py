@@ -1,6 +1,7 @@
 from flask import Flask, render_template
 from flask_pymongo import PyMongo
 import FirefoxScrape
+from random import randint
 
 app = Flask(__name__)
 
@@ -9,7 +10,9 @@ mongo = PyMongo(app)
 
 @app.route("/")
 def index():
-    comment = mongo.db.comments.find_one()
+    records = mongo.db.comments.count()
+    indexID = randint(0,records)
+    comment = mongo.db.comments.find()[indexID]
     return render_template("index.html", comment=comment)
 
 
