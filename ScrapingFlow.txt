@@ -1,0 +1,17 @@
+Scraping Flow
+start
+    retrievePosts
+    commentScrape
+        commentsFields
+            gatherReactions
+                gatherReactionAuthors
+                    gatherAuthorInfo
+            gatherReplies
+                repliesFields
+                    gatherReactions
+                        gatherReactionAuthors
+                            gatherAuthorInfo
+            
+Required vars:
+gatherAuthorInfo - 
+gatherReactionAuthors - browser3, replyID, 

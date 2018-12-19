@@ -8,16 +8,15 @@ import pymongo
 import time
 from config import EMAIL, GEN_PASS
 from datetime import datetime, timedelta
+from itemsForImport import pullFromMongo, reactionsDict, delay
+from multiprocessing import Pool, cpu_count
+from itertools import repeat
 
 def initialize():
-    print(f"Run started at {startTime}")
-#    option = webdriver.ChromeOptions()
-#    option.add_argument("--incognito")
-#    option.add_argument("--window-size=1440,800")
     profile = webdriver.FirefoxProfile()
     profile.set_preference("browser.privatebrowsing.autostart", True)
-    browser = webdriver.Firefox(executable_path='geckodriver.exe', firefox_profile=profile)
-    return browser
+    driver = webdriver.Firefox(executable_path='geckodriver.exe', firefox_profile=profile)
+    return driver
 
 def fbLogin(driver):
     driver.get('https://www.facebook.com/')
@@ -26,9 +25,8 @@ def fbLogin(driver):
     passField = driver.find_element_by_id('pass')
     passField.send_keys(GEN_PASS)
     passField.send_keys(Keys.RETURN)
-    time.sleep(2)
 
-def retrievePosts():
+def retrievePosts(browser):
     results = browser.find_elements_by_xpath('//div[@role="article"]')
     for res in results:
         try:
@@ -38,64 +36,56 @@ def retrievePosts():
             continue
     return articleLinks
 
-def commentScrape():
+def commentScrape(browser, postID):
     browser.get(link)
     WebDriverWait(browser, delay).until(EC.presence_of_element_located((By.ID, "m_story_permalink_view")))
-    timeout = datetime.now() + timedelta(minutes=10)
     try:
-        while browser.find_element_by_id(f'see_next_{postID}') and datetime.now() < timeout:
-            commentsFields()
+        while browser.find_element_by_id(f'see_next_{postID}'):
+            commentsFields(browser, postID)
             browser.find_element_by_id(f'see_next_{postID}').find_element_by_xpath('./a').click()
             time.sleep(1)
     except NoSuchElementException:
         try:
-            commentsFields()
+            commentsFields(browser, postID)
         except:
             pass
 
-def commentsFields():
+def commentsFields(browser, postID):
     container = browser.find_element_by_id('m_story_permalink_view')
     comments = container.find_elements_by_xpath('./div[2]/div/div[5]/div')
     for comment in comments:
         try:
             commentID = comment.get_attribute('id')
+            print(commentID)
             if commentID != f'see_next_{postID}' and commentID != f'see_prev_{postID}':
                 commentText = comment.find_element_by_xpath('./div/div[1]').text
                 try:
+                    reactionsLinkElem = comment.find_element_by_xpath('./div/div[3]/span[1]/span/a[1]')
+                    if 'Like' not in reactionsLinkElem.text:
+                        reactionsLink = comment.find_element_by_xpath('./div/div[3]/span[1]/span/a[1]').get_attribute('href')
+                        reactions = gatherReactions(reactionsLink)
+                    else:
+                        reactions = []
+                        reactionsLink = ''
+                except:
+                    reactionsLink = ''
+                    reactions = []
+                try:
                     authorElem = comment.find_element_by_xpath('./div/h3/a')
-                except Exception as e:
-                    print(repr(e))
+                except:
                     authorElem = ""
                 try:
                     author = authorElem.text
                     profile = authorElem.get_attribute('href').split('?')[0]
-                except Exception as e:
-                    print(repr(e))
+                    authorID = profile.split('facebook.com/')[1]
+                except:
                     author = ''
                     profile = ''
                 try:
                     repliesLink = comment.find_element_by_id(f'comment_replies_more_1:{postID}_{commentID}').find_element_by_xpath('./div[2]/a').get_attribute('href')
                     gatherReplies(repliesLink, commentID)
-                except Exception as e:
-                    print(repr(e))
-                    try:
-                        repliesLink = comment.find_element_by_id(f'comment_replies_more_1:{postID}_{commentID}').find_element_by_xpath('./div/a').get_attribute('href')
-                        gatherReplies(repliesLink, commentID)
-                    except Exception as e:
-                        print(repr(e))
-                        repliesLink = ''
-                try:
-                    reactionsLinkElem = comment.find_element_by_xpath('./div/div[3]/span[1]/span/a[1]')
-                    if 'Like' not in reactionsLinkElem.text:
-                        reactionsLink = comment.find_element_by_xpath('./div/div[3]/span[1]/span/a[1]').get_attribute('href')
-                        reactions = gatherReactions(reactionsLink, commentID)
-                    else:
-                        reactions = []
-                        reactionsLink = ''
-                except Exception as e:
-                    print(repr(e))
-                    reactionsLink = ''
-                    reactions = []
+                except:
+                    repliesLink = ''
                 commentsStorage[commentID] = {
                     "article": link,
                     "articleID": postID,
@@ -105,7 +95,8 @@ def commentsFields():
                     "replies": repliesLink,
                     "reactionsLink": reactionsLink,
                     "author": author,
-                    "profile": profile
+                    "profile": profile,
+                    "authorID": authorID
                     }
                 total = sum([int(value) for (key, value) in reactions])
                 commentsStorage[commentID]["reactions"]["total"] = total
@@ -118,7 +109,7 @@ def commentsFields():
         except StaleElementReferenceException:
             continue
 
-def gatherReactions(reactionsLink, commentID, replyID=''):
+def gatherReactions(reactionsLink, replyID=''):
     reactionsList = []
     browser3.get(reactionsLink)
     WebDriverWait(browser3, delay).until(EC.presence_of_element_located((By.CLASS_NAME, "z")))
@@ -130,49 +121,30 @@ def gatherReactions(reactionsLink, commentID, replyID=''):
             reactType = reactionsDict[val]
             count = reactionLink.split('total_count=')[1].split('&')[0]
             reactionsList.append((reactType, count))
-    repeat = True
-    try:
-        while repeat:
-            gatherReactionAuthors(browser3, replyID, commentID)
-            time.sleep(1)
-        print(reactionsList)
-        return reactionsList
-    except:
-        return reactionsList
+    gatherReactionAuthors(browser3, replyID)
+    return reactionsList
 
-def gatherReactionAuthors(browser3, replyID, commentID):
-    reacts = browser3.find_element_by_tag_name('ul').find_elements_by_tag_name("li")
-    if len(reacts) < 2:
-        print([x for x in reacts])
-    repeat = False
+# I need to figure out a unique identifier for each reaction so that it can be inserted into the reactions collection.
+# I think the best way to do this would probably be create a string from the author profile, commentID, and replyID
+# to use as the key, and then have the reaction type as the value. We don't need the name for this because we can put their
+# name in the Profiles collection.
+def gatherReactionAuthors(browser3, replyID):
+    reacts = browser3.find_element_by_class_name('be').find_elements_by_tag_name("tr")
     for react in reacts:
-        print(react.text.encode('ascii', 'ignore'))
-        if 'See More' in react.text:
-            repeat = True
-            react.find_element_by_tag_name('a').click()
-            break
         reactImages = react.find_elements_by_tag_name('img')
         for reactImage in reactImages:
             reactImg = reactImage.get_attribute('alt')
             if reactImg in reactionsDict:
                 reactResponse = reactionsDict[reactImg]
-        reactAuthorProfile = react.find_element_by_xpath('./table/tbody/tr/td/table/tbody/tr/td[3]/div/h3[1]/a').get_attribute('href')
-        splitProfile = reactAuthorProfile.split('facebook.com/')[1].split('/')[0]
-        concatString = f"{commentID}{replyID}{splitProfile}"
-        reactionsStorage[concatString] = {
-            "postID": postID,
-            "reactID": concatString,
-            "reaction": reactResponse,
-            "comment": commentID,
-            "reply": replyID,
-            "author": reactAuthorProfile
-        }
-        search = reactionsCollection.find({"reactID":reactionsStorage[concatString]['reactID']})
+        reactAuthorProfile = react.find_element_by_xpath('./td[3]/div/h3[1]/a').get_attribute('href')
+        reactAuthorID = reactAuthorProfile.split('facebook.com/')[1].split('/')[0]
+        reactionsStorage[reactAuthorProfile][commentID][replyID]["react"] = reactResponse
+        search = reactionsCollection.find({"author":reactionsStorage[reactAuthorProfile]['replyID']})
         if len([r for r in search]) == 0:
-            reactionsCollection.insert_one(reactionsStorage[concatString])
+            reactionsCollection.insert_one(reactionsStorage)
         else:
-            repliesCollection.update_one({"reactID":reactionsStorage[concatString]['reactID']},
-                                                   {'$set': repliesStorage[concatString]})
+            reactionsCollection.update_one({"replyID":reactionsStorage[replyID]['replyID']},
+                                                   {'$set': reactionsStorage[replyID]})
 
 def gatherReplies(repliesLink, commentID):
     browser2.get(repliesLink)
@@ -201,11 +173,11 @@ def repliesFields(commentID):
             replyText = response.find_element_by_xpath('./div/div[1]').text
             replyAuthorElem = response.find_element_by_tag_name('h3').find_element_by_tag_name('a')
             replyAuthor = replyAuthorElem.text
-            replyAuthorProfile = replyAuthorElem.get_attribute('href').split('?')[0]
+            replyAuthorProfile = replyAuthorElem.get_attribute('href')
             reactionsLinkElem = response.find_element_by_id(f'like_{postID}_{replyID}').find_element_by_xpath('./span/a[1]')
             if 'Like' not in reactionsLinkElem.text:
                 replyReactionsLink = reactionsLinkElem.get_attribute('href')
-                replyReactions = gatherReactions(replyReactionsLink, commentID, replyID)
+                replyReactions = gatherReactions(replyReactionsLink, replyID)
             else:
                 replyReactions = []
             repliesStorage[replyID] = {
@@ -217,8 +189,6 @@ def repliesFields(commentID):
                     "author": replyAuthor,
                     "profile": replyAuthorProfile
                     }
-            total = sum([int(value) for (key, value) in replyReactions])
-            repliesStorage[replyID]["reactions"]["total"] = total
             search = repliesCollection.find({"replyID":repliesStorage[replyID]['replyID']})
             if len([r for r in search]) == 0:
                 repliesCollection.insert_one(repliesStorage[replyID])
@@ -226,14 +196,7 @@ def repliesFields(commentID):
                 repliesCollection.update_one({"replyID":repliesStorage[replyID]['replyID']},
                                                        {'$set': repliesStorage[replyID]})
 
-def pullFromMongo(coll, keyID):
-    search = coll.find()
-    dictVar = {}
-    for r in search:
-        dictVar[r[keyID]] = r
-    return dictVar
-
-if __name__ == '__main__':
+def start():
     startTime = datetime.now()
     conn = 'mongodb://localhost:27017'
     client = pymongo.MongoClient(conn)
@@ -242,24 +205,10 @@ if __name__ == '__main__':
     repliesCollection = db.replies
     reactionsCollection = db.reactions
 
-    commentsStorage, repliesStorage, reactionsStorage = pullFromMongo(commentsCollection, 'commentID'), pullFromMongo(repliesCollection, 'commentID'), pullFromMongo(reactionsCollection, 'reactID')
+    commentsStorage, repliesStorage = pullFromMongo(commentsCollection, 'commentID'), pullFromMongo(repliesCollection, 'commentID')
+    reactionsStorage, profileStorage = pullFromMongo(reactionsCollection, 'reactionID') pullFromMongo(profilesColllection, 'authorID')
     delay = 10
     articleLinks, articles = [], []
-    reactionsDict = {
-            "all": "total",
-            "1": "like",
-            "2": "love",
-            "3": "wow",
-            "4": "haha",
-            "7": "sad",
-            "8": "angry",
-            "Like": "like",
-            "Love": "love",
-            "Haha": "haha",
-            "Angry": "angry",
-            "Wow": "wow",
-            "Sad": "sad"
-            }
 
     browser = initialize()
     browser2 = initialize()
@@ -271,12 +220,16 @@ if __name__ == '__main__':
     browser.get('https://mobile.facebook.com/pg/DonaldTrump/posts/')
     WebDriverWait(browser, delay).until(EC.presence_of_element_located((By.ID, "structured_composer_async_container")))
     for i in range(5):
-        articles.extend(retrievePosts())
+        articles.extend(retrievePosts(browser))
         browser.find_element_by_id('structured_composer_async_container').find_element_by_xpath('./div[2]/a').click()
         time.sleep(2)
 
+    with Pool(cpu_count()-1) as p:
+        p.starmap()
     for link in articleLinks:
-        postID = link.split('story_fbid=')[1].split('&')[0]
-        commentScrape()
+        with Pool(1) as p:
+            postID = link.split('story_fbid=')[1].split('&')[0]
+            p.starmap(commentScrape, zip(articleLinks))
     print(f"Run completed at {datetime.now()}")
     print(f"Elapsed time: {datetime.now() - startTime}")
+start()
